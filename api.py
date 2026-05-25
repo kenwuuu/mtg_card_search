@@ -47,7 +47,8 @@ RATE_BULK     = "2/second"
 BULK_MAX_IDS  = 200
 
 # CORS origins. DESIGN DECISION: pull from env var in production.
-CORS_ORIGINS  = ["http://localhost:5174", "https://aura0.app/", "https://aura-dqp.pages.dev/", "https://y-websocket-test.aura-dqp.pages.dev/"]
+CORS_ORIGINS  = ["*"]
+# CORS_ORIGINS  = ["http://localhost:5174", "https://aura0.app/", "https://aura-dqp.pages.dev/", "https://y-websocket-test.aura-dqp.pages.dev/"]
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +245,7 @@ def _dataset_for_request(dataset: Optional[str]) -> str:
     return DATASET_NAMES[0]  # DESIGN DECISION: default dataset fallback
 
 def scan(card_id):
-    with open('cards/unique_artwork.json', 'rb') as f:
+    with open('old_cards/unique_artwork.json', 'rb') as f:
         for item in ijson.items(f, "item"):
             if card_id in item['name'] or card_id in item.get('printed_name', []) or card_id in item.get('flavor_name', []):
                 return item
@@ -299,7 +300,7 @@ class BulkLookupRequest(BaseModel):
 # Routes
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@app.get("v1/health")
 def health():
     if not any(indices.values()):
         raise HTTPException(status_code=503, detail="No indices loaded")
@@ -309,7 +310,7 @@ def health():
     }
 
 
-@app.get("/cards/{card_id}")
+@app.get("v1/cards/{card_id}")
 @limiter.limit(RATE_SINGLE)
 def get_card(
         request: Request,
@@ -322,7 +323,7 @@ def get_card(
     return result
 
 
-@app.post("/cards/bulk/lookup")
+@app.post("v1/cards/bulk/lookup")
 @limiter.limit(RATE_BULK)
 def get_cards_bulk(request: Request, body: BulkLookupRequest):
     found, not_found = bulk_lookup(body.card_ids, body.dataset)

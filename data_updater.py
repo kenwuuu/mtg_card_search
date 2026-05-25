@@ -24,6 +24,7 @@ load_dotenv()
 
 BULK_DATA_TYPES = os.getenv("BULK_DATA_TYPES").split(",")
 CHUNK_SIZE = 20 * 1024 * 1024  # 20 MB
+FOLDER = "./cards"
 
 def time_it(title):
     def decorator(func):
@@ -69,7 +70,7 @@ def download_bulk_data():
         with requests.get(url, stream=True) as response:
             response.raise_for_status()
 
-            with open(f'{data_type}.json', 'wb') as f:
+            with open(f'{FOLDER}/{data_type}.json', 'wb') as f:
                 for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
                     if chunk:  # filter out keep-alive chunks
                         f.write(chunk)
@@ -88,13 +89,11 @@ def convert_json_to_ndjson():
                 return float(o)
             return super().default(o)
 
-    current_dir = os.getcwd()
-
-    for filename in os.listdir(current_dir):
+    for filename in os.listdir():
         if filename.endswith(".json"):
-            input_path = os.path.join(current_dir, filename)
+            input_path = os.path.join(FOLDER, filename)
             output_path = os.path.join(
-                current_dir,
+                FOLDER,
                 filename[:-5] + ".ndjson"
             )
 
