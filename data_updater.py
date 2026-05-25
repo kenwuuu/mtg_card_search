@@ -13,15 +13,17 @@ import json
 import os
 import tracemalloc
 from decimal import Decimal
+from dotenv import load_dotenv
 from functools import wraps
 from time import perf_counter
 
 import ijson
 import requests
 
+load_dotenv()
+
 BULK_DATA_TYPES = os.getenv("BULK_DATA_TYPES").split(",")
 CHUNK_SIZE = 20 * 1024 * 1024  # 20 MB
-
 
 def time_it(title):
     def decorator(func):
