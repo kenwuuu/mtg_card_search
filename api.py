@@ -47,7 +47,7 @@ RATE_BULK     = "2/second"
 BULK_MAX_IDS  = 200
 
 # CORS origins. DESIGN DECISION: pull from env var in production.
-CORS_ORIGINS  = ["http://localhost:5174"]
+CORS_ORIGINS  = ["http://localhost:5174", "https://aura0.app/", "https://aura-dqp.pages.dev/", "https://y-websocket-test.aura-dqp.pages.dev/"]
 
 
 # ---------------------------------------------------------------------------
