@@ -10,6 +10,7 @@ before physical release. Worst case, we'd get the cards updated ~2 weeks
 before physical release.
 """
 import json
+import os
 import tracemalloc
 from decimal import Decimal
 from functools import wraps
@@ -18,7 +19,7 @@ from time import perf_counter
 import ijson
 import requests
 
-BULK_DATA_TYPE = 'oracle_cards'
+BULK_DATA_TYPES = os.getenv("BULK_DATA_TYPES").split(",")
 CHUNK_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
@@ -46,33 +47,36 @@ def download_bulk_data():
         response.raise_for_status()
         return response.json()
 
-    def get_bulk_download_url():
+    def get_bulk_download_url(bulk_data_type):
         data = get_bulk_data_items()
 
         for file in data['data']:
-            if file['type'] == BULK_DATA_TYPE:
+            if file['type'] == bulk_data_type:
                 return file['download_uri']
 
         raise ValueError(
-            f"No bulk data type '{BULK_DATA_TYPE}' found. "
+            f"No bulk data type '{bulk_data_type}' found. "
             f"Available types: {[f['type'] for f in data['data']]}"
         )
 
-    url = get_bulk_download_url()
+    urls = {data_type: '' for data_type in BULK_DATA_TYPES}
+    for bulk_data_type in BULK_DATA_TYPES:
+        urls[bulk_data_type] = (get_bulk_download_url(bulk_data_type))
 
-    with requests.get(url, stream=True) as response:
-        response.raise_for_status()
+    for data_type, url in urls.items():
+        with requests.get(url, stream=True) as response:
+            response.raise_for_status()
 
-        with open('cards.json', 'wb') as f:
-            for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                if chunk:  # filter out keep-alive chunks
-                    f.write(chunk)
-                    f.flush()
+            with open(f'{data_type}.json', 'wb') as f:
+                for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                    if chunk:  # filter out keep-alive chunks
+                        f.write(chunk)
+                        f.flush()
 
 @time_it(title="Converting JSON to NDJSON")
 def convert_json_to_ndjson():
     """
-    Converts `cards.json` to `cards.ndjson`
+    Converts all `.json` files to `.ndjson` files
     This generally takes ~20 seconds to run; memory usage <1MB.
     :return:
     """
@@ -82,10 +86,23 @@ def convert_json_to_ndjson():
                 return float(o)
             return super().default(o)
 
-    with open("cards.json", "rb") as inp, open("cards.ndjson", "w") as out:
-        for item in ijson.items(inp, "item"):
-            out.write(json.dumps(item, cls=DecimalEncoder) + "\n")
+    current_dir = os.getcwd()
 
+    for filename in os.listdir(current_dir):
+        if filename.endswith(".json"):
+            input_path = os.path.join(current_dir, filename)
+            output_path = os.path.join(
+                current_dir,
+                filename[:-5] + ".ndjson"
+            )
+
+            print(f"Converting {filename} -> {os.path.basename(output_path)}")
+
+            with open(input_path, "rb") as inp, open(output_path, "w") as out:
+                for item in ijson.items(inp, "item"):
+                    out.write(
+                        json.dumps(item, cls=DecimalEncoder) + "\n"
+                    )
 
 if __name__ == '__main__':
     # start tracking memory usage
