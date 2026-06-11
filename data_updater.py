@@ -25,6 +25,10 @@ load_dotenv()
 BULK_DATA_TYPES = os.getenv("BULK_DATA_TYPES").split(",")
 CHUNK_SIZE = 20 * 1024 * 1024  # 20 MB
 FOLDER = "./cards"
+HEADERS = {
+    "User-Agent": "Aura0/1.0 (kenqiwu@gmail.com)",  # Scryfall asks for app name + contact
+    "Accept": "*/*"
+}
 
 def time_it(title):
     def decorator(func):
@@ -46,25 +50,24 @@ def download_bulk_data():
     :return: None
     """
     def get_bulk_data_items() -> dict:
-        response = requests.get('https://api.scryfall.com/bulk-data')
+        response = requests.get('https://api.scryfall.com/bulk-data', headers=HEADERS)
         response.raise_for_status()
         return response.json()
 
-    def get_bulk_download_url(bulk_data_type):
-        data = get_bulk_data_items()
-
-        for file in data['data']:
+    def get_bulk_download_urls(bulk_data, bulk_data_type):
+        for file in bulk_data['data']:
             if file['type'] == bulk_data_type:
                 return file['download_uri']
 
         raise ValueError(
             f"No bulk data type '{bulk_data_type}' found. "
-            f"Available types: {[f['type'] for f in data['data']]}"
+            f"Available types: {[f['type'] for f in bulk_data['data']]}"
         )
 
+    bulk_data = get_bulk_data_items()
     urls = {data_type: '' for data_type in BULK_DATA_TYPES}
     for bulk_data_type in BULK_DATA_TYPES:
-        urls[bulk_data_type] = (get_bulk_download_url(bulk_data_type))
+        urls[bulk_data_type] = (get_bulk_download_urls(bulk_data, bulk_data_type))
 
     for data_type, url in urls.items():
         with requests.get(url, stream=True) as response:
@@ -89,21 +92,23 @@ def convert_json_to_ndjson():
                 return float(o)
             return super().default(o)
 
-    for filename in os.listdir():
+    for filename in os.listdir(FOLDER):
         if filename.endswith(".json"):
             input_path = os.path.join(FOLDER, filename)
             output_path = os.path.join(
                 FOLDER,
                 filename[:-5] + ".ndjson"
             )
+            temp_path = output_path + "_new"
 
             print(f"Converting {filename} -> {os.path.basename(output_path)}")
 
-            with open(input_path, "rb") as inp, open(output_path, "w") as out:
+            with open(input_path, "rb") as inp, open(temp_path, "w") as out:
                 for item in ijson.items(inp, "item"):
                     out.write(
                         json.dumps(item, cls=DecimalEncoder) + "\n"
                     )
+            os.replace(temp_path, output_path)
 
 if __name__ == '__main__':
     # start tracking memory usage
