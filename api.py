@@ -122,6 +122,8 @@ def build_index(dataset: str) -> None:
     path = DATA_FILES[dataset]
     new_index: Dict[str, int] = {}
 
+    logger.info(f"Building index for [{dataset}]")
+
     with path.open("rb") as f:
         while True:
             offset = f.tell()
