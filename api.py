@@ -136,11 +136,9 @@ def build_index(dataset: str) -> None:
             # DESIGN DECISION: key extraction per dataset.
             # Option (a) — same schema everywhere:
 
-            # Art cards are named the same thing on both sides of the //
-            # e.g. BLC 41 Mr. Foxglove // Mr. Foxglove
-            # As opposed to combined cards which are named differently.
-            # e.g. WOE 7 Cheeky House-Mouse // Squeak By
-            if ' // ' in data["name"] and data["name"].split(' // ')[0] == data["name"].split(' // ')[1]:
+            # This line skips art cards. We skip art cards because they are not legal
+            # e.g. ABLB 31 Mr. Foxglove // Mr. Foxglove
+            if data["layout"] == "art_series":
                 continue
 
             name_key = normalize_key(data["name"].split(' // ')[0])
