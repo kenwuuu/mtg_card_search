@@ -9,6 +9,12 @@ Requires Python 3.12+.
 
 ## Setting up on a new server
 
+`scripts/setup.sh` automates steps 1-9 below (venv, deps, `.env` bootstrap,
+initial data fetch, systemd unit, cron) — run `./scripts/setup.sh --help`-style
+usage comments at the top of the file for flags, or read the manual steps here
+if you'd rather do it by hand or understand what it's doing. Either way, step
+5 (Caddy) is never automated — it's domain/TLS-specific.
+
 1. Clone the repo and `cd` into it.
    ```
    git clone <repo-url> mtg_card_search
@@ -100,6 +106,37 @@ Requires Python 3.12+.
    index automatically when `data_updater.py` overwrites them — no restart
    needed after a data refresh.
 
+## Before deploying to production
+
+There's no staging environment for this project, so confidence comes from
+layering fast, cheap checks before anything touches the real server:
+
+1. `.venv/bin/python3 -m pytest tests/` — the fast suite (`test_data_updater.py`)
+   exercises the run lock, the sanity-check accept/reject paths, the
+   healthchecks.io ping sequence, and the PostHog/Sentry no-op behavior, all
+   against `tmp_path` fixtures — no network, no real data, runs in ~2 seconds.
+   This is what to run on every commit, not just before a deploy.
+2. `.venv/bin/python3 -c "import api; import data_updater"` — catches
+   config/import errors (a broken `.env`, a typo) before they reach the server.
+3. Run the server locally against real data and `./scripts/smoke_test.sh` it —
+   covers `/v1/health`, a known-good lookup, a 404, and a mixed bulk lookup in
+   a few seconds. Run this again immediately after every deploy, against the
+   real server, not just locally beforehand.
+4. For a genuinely new environment (new server, first deploy), run
+   `scripts/setup.sh` against a throwaway VM or container first — cheap
+   insurance that the automated bootstrap actually works before trusting it
+   against production.
+5. For exhaustive (but slow) coverage, `tests/test_all_cards.py` walks every
+   card in the dataset against a running server — useful after a Scryfall
+   schema change or when debugging a specific lookup class, not as a routine
+   pre-deploy gate.
+
+None of this replaces the runtime safety nets already built in — the atomic
+`.ndjson` swap and entry-count sanity check mean a bad `data_updater.py` run
+can't corrupt what's being served, and `/v1/health`'s `stale` flag plus the
+alerting in the section below catch problems that show up only after
+deploying.
+
 ## Deploying an update to an existing server
 
 ```
@@ -109,7 +146,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 sudo systemctl restart mtg-card-search
 ```
-Then re-check `curl localhost:8000/v1/health`. If something's wrong,
+Then run `./scripts/smoke_test.sh` (or at minimum
+`curl localhost:8000/v1/health`). If something's wrong,
 `git checkout <previous-commit>` and restart again to roll back.
 
 ## Manually running data_updater
@@ -174,9 +212,16 @@ the only piece that covers "the whole job stopped running."
 
 ## Running tests
 
+`tests/test_data_updater.py` is the fast, no-network, no-real-data suite (lock,
+sanity-check, alerting no-op paths) — run this one routinely:
+```
+.venv/bin/python3 -m pytest tests/
+```
+
 `tests/test_all_cards.py` walks every card in `CARD_JSON_DIR` and hits a
-running server to check name/set lookups resolve. Start the server first,
-then:
+running server to check name/set lookups resolve — slow, exhaustive, not a
+routine check (see "Before deploying to production" above for
+`scripts/smoke_test.sh`, the fast alternative). Start the server first, then:
 ```
 python3 tests/test_all_cards.py
 ```
