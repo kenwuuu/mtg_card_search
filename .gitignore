@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment / secrets
+.env
+
+# Card data (large, fetched by data_updater.py — see README)
+cards/
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
+
+# Local debug output
+failures
