@@ -1,15 +1,10 @@
-import os
-
-import ijson
-from dotenv import load_dotenv
-
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from functools import wraps
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import json
 import logging
 import threading
@@ -20,22 +15,20 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi.middleware.cors import CORSMiddleware
 
+from settings import settings
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-CARD_JSON_DIR = Path(os.getenv("CARD_JSON_DIR"))
-# Consider making this an env var or CLI arg.
+CARD_JSON_DIR = settings.card_json_dir
 
 # List of dataset names (no extension). Each must have a matching <name>.ndjson
-# in CARD_JSON_DIR. DESIGN DECISION: load this from an env var, config file,
-# or CLI argument instead of hardcoding — whatever fits your deployment model.
-DATASET_NAMES: List[str] = os.getenv("BULK_DATA_TYPES").split(",")
+# in CARD_JSON_DIR. Sourced from the BULK_DATA_TYPES env var (see settings.py).
+DATASET_NAMES: List[str] = settings.dataset_names
 
 NDJSON_EXT = ".ndjson"
 
@@ -46,9 +39,8 @@ RATE_BULK     = "2/second"
 # Maximum card IDs accepted in a single bulk request.
 BULK_MAX_IDS  = 200
 
-# CORS origins. DESIGN DECISION: pull from env var in production.
-CORS_ORIGINS  = ["*"]
-# CORS_ORIGINS  = ["http://localhost:5174", "https://aura0.app/", "https://aura-dqp.pages.dev/", "https://y-websocket-test.aura-dqp.pages.dev/"]
+# CORS origins, sourced from the CORS_ORIGIN env var (see settings.py).
+CORS_ORIGINS  = settings.cors_origins
 
 
 # ---------------------------------------------------------------------------
@@ -104,23 +96,60 @@ def normalize_key(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-dataset key extraction (extensibility point)
+# ---------------------------------------------------------------------------
+
+def _default_should_skip(data: dict) -> bool:
+    # Skip art cards — they are not legal cards.
+    # e.g. ABLB 31 Mr. Foxglove // Mr. Foxglove
+    # As opposed to combined cards which are named differently.
+    # e.g. WOE 7 Cheeky House-Mouse // Squeak By
+    # /v1/cards/slD1512 should work though and return the cat/dog sol ring
+    return data.get("layout") == "art_series"
+
+
+def _default_key_extractor(data: dict) -> Iterable[str]:
+    """Scryfall-schema key extractor: name, flavor_name, printed_name, set+collector_number."""
+    name_key = normalize_key(data["name"].split(' // ')[0])
+    flavor_name_key = normalize_key(data.get("flavor_name", ''))
+    printed_name_key = normalize_key(data.get("printed_name", ''))
+    set_key = normalize_key(f'{data["set"]}{data["collector_number"]}')
+
+    yield name_key
+    if flavor_name_key:
+        yield flavor_name_key
+    if printed_name_key:
+        yield printed_name_key
+    yield set_key
+
+
+# DESIGN DECISION: per-dataset extensibility hooks. Every dataset defaults to
+# the Scryfall-schema extractor/predicate above. To support a dataset with a
+# different schema, override its entry before build_all_indices() runs, e.g.
+# KEY_EXTRACTORS["my_dataset"] = my_custom_extractor.
+SKIP_PREDICATES: Dict[str, Callable[[dict], bool]] = {
+    name: _default_should_skip for name in DATASET_NAMES
+}
+KEY_EXTRACTORS: Dict[str, Callable[[dict], Iterable[str]]] = {
+    name: _default_key_extractor for name in DATASET_NAMES
+}
+
+
+# ---------------------------------------------------------------------------
 # Index building (per-dataset)
 # ---------------------------------------------------------------------------
 
 @_time_it("Building index")
 def build_index(dataset: str) -> None:
-    """
-    (Re)build the in-memory index for a single dataset file.
+    """(Re)build the in-memory index for a single dataset file.
 
-    DESIGN DECISION: the keys indexed here are `name` (no spaces) and
-    `set+collector_number`. If your other .ndjson files have a different schema
-    you will need to either:
-      a) define a per-dataset key-extraction function, or
-      b) agree on a common schema across all files.
-    Add that logic where indicated below.
+    Keys are produced by SKIP_PREDICATES[dataset] / KEY_EXTRACTORS[dataset] —
+    see the registries above for how to support a different schema.
     """
     path = DATA_FILES[dataset]
     new_index: Dict[str, int] = {}
+    should_skip = SKIP_PREDICATES[dataset]
+    extract_keys = KEY_EXTRACTORS[dataset]
 
     logger.info(f"Building index for [{dataset}]")
 
@@ -133,33 +162,16 @@ def build_index(dataset: str) -> None:
 
             data = json.loads(line)
 
-            # DESIGN DECISION: key extraction per dataset.
-            # Option (a) — same schema everywhere:
-
-            # This line skips art cards. We skip art cards because they are not legal
-            # e.g. ABLB 31 Mr. Foxglove // Mr. Foxglove
-            if data["layout"] == "art_series":
+            if should_skip(data):
                 continue
 
-            name_key = normalize_key(data["name"].split(' // ')[0])
-            flavor_name_key = normalize_key(data.get("flavor_name", ''))
-            printed_name_key = normalize_key(data.get("printed_name", ''))
-            set_key = normalize_key(f'{data["set"]}{data["collector_number"]}')
+            for key in extract_keys(data):
+                if key not in new_index:
+                    new_index[key] = offset
 
-            # Option (b) — per-dataset key extractor (uncomment and extend):
-            # name_key, set_key = _extract_keys(dataset, data)
-
-            if name_key not in new_index:
-                new_index[name_key] = offset
-            if flavor_name_key != '' and flavor_name_key not in new_index:
-                new_index[flavor_name_key] = offset
-            if printed_name_key != '' and printed_name_key not in new_index:
-                new_index[printed_name_key] = offset
-            if set_key not in new_index:
-                new_index[set_key] = offset
-
-    indices[dataset].clear()
-    indices[dataset].update(new_index)
+    # Atomic rebind — readers always look up `indices[dataset]` fresh, so this
+    # swap never exposes a partially-populated index to a concurrent reader.
+    indices[dataset] = new_index
     logger.info(f"[{dataset}] Index built with {len(new_index)} entries.")
 
 
@@ -215,7 +227,9 @@ app = FastAPI(title="Card Lookup API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    # Wildcard origins + credentials is rejected by browsers, so only allow
+    # credentials when a concrete origin allowlist is configured.
+    allow_credentials=CORS_ORIGINS != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -244,24 +258,26 @@ def _dataset_for_request(dataset: Optional[str]) -> str:
         return dataset
     return DATASET_NAMES[0]  # DESIGN DECISION: default dataset fallback
 
-def scan(card_id):
-    with open('cards/unique_artwork.json', 'rb') as f:
-        for item in ijson.items(f, "item"):
-            if card_id in item['name'] or card_id in item.get('printed_name', []) or card_id in item.get('flavor_name', []):
-                return item
-
-
 def lookup(card_id: str, dataset: Optional[str] = None) -> Optional[dict]:
     ds = _dataset_for_request(dataset)
+    offset = indices[ds].get(normalize_key(card_id))
+
+    if offset is None:
+        # DESIGN DECISION: cross-dataset fallback chain, e.g. an Oracle-only
+        # card ID falling back to a unique-artwork dataset. Configure via
+        # DATASET_FALLBACKS (see settings.py).
+        fallback = settings.dataset_fallbacks.get(ds)
+        if fallback and fallback != ds and fallback in indices:
+            return lookup(card_id.lower(), fallback)
+        return None
+
     try:
-        offset = indices[ds].get(normalize_key(card_id))
-        if offset is None and ds == os.getenv("ORACLE_CARDS"):
-            return lookup(card_id.lower(), 'unique_artwork')
         f = get_handle(ds)
         f.seek(offset)
         return json.loads(f.readline())
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError):
+        logger.exception(f"Failed to read card {card_id!r} from dataset [{ds}] at offset {offset}")
+        return None
 
 
 def bulk_lookup(

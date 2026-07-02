@@ -13,18 +13,17 @@ import json
 import os
 import tracemalloc
 from decimal import Decimal
-from dotenv import load_dotenv
 from functools import wraps
 from time import perf_counter
 
 import ijson
 import requests
 
-load_dotenv()
+from settings import settings
 
-BULK_DATA_TYPES = os.getenv("BULK_DATA_TYPES").split(",")
+BULK_DATA_TYPES = settings.dataset_names
 CHUNK_SIZE = 20 * 1024 * 1024  # 20 MB
-FOLDER = "./cards"
+FOLDER = str(settings.card_json_dir)
 HEADERS = {
     "User-Agent": "Aura0/1.0 (kenqiwu@gmail.com)",  # Scryfall asks for app name + contact
     "Accept": "*/*"
@@ -92,23 +91,20 @@ def convert_json_to_ndjson():
                 return float(o)
             return super().default(o)
 
-    for filename in os.listdir(FOLDER):
-        if filename.endswith(".json"):
-            input_path = os.path.join(FOLDER, filename)
-            output_path = os.path.join(
-                FOLDER,
-                filename[:-5] + ".ndjson"
-            )
-            temp_path = output_path + "_new"
+    for data_type in BULK_DATA_TYPES:
+        filename = f"{data_type}.json"
+        input_path = os.path.join(FOLDER, filename)
+        output_path = os.path.join(FOLDER, f"{data_type}.ndjson")
+        temp_path = output_path + "_new"
 
-            print(f"Converting {filename} -> {os.path.basename(output_path)}")
+        print(f"Converting {filename} -> {os.path.basename(output_path)}")
 
-            with open(input_path, "rb") as inp, open(temp_path, "w") as out:
-                for item in ijson.items(inp, "item"):
-                    out.write(
-                        json.dumps(item, cls=DecimalEncoder) + "\n"
-                    )
-            os.replace(temp_path, output_path)
+        with open(input_path, "rb") as inp, open(temp_path, "w") as out:
+            for item in ijson.items(inp, "item"):
+                out.write(
+                    json.dumps(item, cls=DecimalEncoder) + "\n"
+                )
+        os.replace(temp_path, output_path)
 
 if __name__ == '__main__':
     # start tracking memory usage
