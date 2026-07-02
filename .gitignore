@@ -21,3 +21,8 @@ cards/
 
 # Local debug output
 failures
+
+# data_updater.py operational state (log, run lock, sanity-check counts)
+data_updater.log
+*.lock
+.dataset_counts.json

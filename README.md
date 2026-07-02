@@ -119,6 +119,59 @@ source .venv/bin/activate
 python3 data_updater.py
 ```
 
+## Alerting
+
+`data_updater.py` runs unattended via cron, so failures need to surface on
+their own. Two mechanisms are wired (set the env var to activate — see
+`.env.example`), one is deliberately left unconfigured:
+
+- **healthchecks.io** (`HEALTHCHECK_PING_URL`) — a dead-man's-switch. The
+  script pings `<url>/start` before a run, `<url>` on success, `<url>/fail`
+  immediately on failure. healthchecks.io alerts you if it *doesn't* hear a
+  success/fail ping within the schedule + grace period you configure — this
+  is the only mechanism here that catches the job not running at all (box
+  down, cron never re-armed after a reboot, etc.), since nothing running on a
+  dead machine can page you about itself.
+  To connect it: create a free account and a check at
+  [healthchecks.io](https://healthchecks.io), set its schedule to match the
+  cron cadence (weekly, with a grace period of a few hours), copy the ping
+  URL it gives you (`https://hc-ping.com/<uuid>`), and set
+  `HEALTHCHECK_PING_URL` to that URL in `.env`. Nothing else to do — the
+  `/start`, success, and `/fail` pings are already wired in.
+- **PostHog** (`POSTHOG_API_KEY`) — captures `data_update_succeeded` (with
+  per-dataset entry counts and run duration) and `data_update_failed` (with
+  the error) as events. Mainly useful as a trend: card counts jump
+  predictably around new set releases, so a dashboard of this over time
+  doubles as a release-tracking signal, not just a health check.
+- **Sentry** (`SENTRY_DSN`) — captures the exception on a failed run with a
+  full stack trace. Left plumbed but inactive: `sentry-sdk` is intentionally
+  not in `requirements.txt` yet, so this needs both `pip install sentry-sdk`
+  and `SENTRY_DSN` set to activate. No further code changes needed either way
+  — `data_updater.py` already calls `capture_exception()` in its failure path.
+
+### Why not just cron + systemd alone?
+
+Converting the cron job to a **systemd timer** (a `.timer` unit triggering a
+`.service` unit, like cron but integrated with systemd) buys two things for
+free: `journalctl` captures all output automatically (today's crontab line
+redirects to a plain file that nothing rotates or watches), and a
+`.service`'s `OnFailure=` directive can trigger another unit — e.g. one that
+posts to a Slack webhook — automatically whenever the run exits non-zero, no
+code changes needed.
+
+The gap: `OnFailure=` runs on the *same machine* as the failed job. If the
+box crashes, loses power, or cron/systemd itself doesn't come back after a
+reboot, there's nothing left on that machine to fire the failure hook — this
+is exactly the "job silently stopped running" failure mode, and only an
+external watchdog (healthchecks.io) can catch it, because it lives outside
+the machine that might be dead. `/v1/health`'s `stale` flag (10-day
+threshold) is a second, independent backstop for the same gap if you'd rather
+poll the API than run a systemd timer.
+
+Recommendation: a systemd timer + `OnFailure=` is worth doing regardless (better
+logs, zero-cost local failure alerting), but keep healthchecks.io too — it's
+the only piece that covers "the whole job stopped running."
+
 ## Running tests
 
 `tests/test_all_cards.py` walks every card in `CARD_JSON_DIR` and hits a

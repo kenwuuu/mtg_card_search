@@ -47,6 +47,23 @@ class Settings:
     # Configure via DATASET_FALLBACKS="cards:unique_artwork,other:default" in .env.
     dataset_fallbacks: Dict[str, str]
 
+    # --- data_updater.py alerting (all optional; each integration no-ops if
+    # its var is unset) ---
+    # PostHog: reports data_update_succeeded/data_update_failed events (with
+    # per-dataset card counts and run duration) so pipeline runs and card-count
+    # growth over time are visible on a dashboard. Wired — set to activate.
+    posthog_api_key: Optional[str]
+    posthog_host: str
+    # healthchecks.io (or any compatible dead-man's-switch): the base ping URL
+    # for one check, e.g. https://hc-ping.com/<uuid>. Wired — set to activate.
+    # See README for the /start and /fail suffix convention this uses.
+    healthcheck_ping_url: Optional[str]
+    # Sentry: captures the exception on a failed run. PLUMBED BUT NOT WIRED —
+    # sentry-sdk is intentionally not in requirements.txt yet; this is a
+    # pending decision, not just a missing key. Add the dependency and set
+    # SENTRY_DSN to activate.
+    sentry_dsn: Optional[str]
+
     @classmethod
     def load(cls) -> "Settings":
         card_json_dir = Path(_require("CARD_JSON_DIR"))
@@ -79,6 +96,10 @@ class Settings:
             dataset_names=dataset_names,
             cors_origins=cors_origins,
             dataset_fallbacks=dataset_fallbacks,
+            posthog_api_key=os.getenv("POSTHOG_API_KEY") or None,
+            posthog_host=os.getenv("POSTHOG_HOST", "https://us.i.posthog.com"),
+            healthcheck_ping_url=os.getenv("HEALTHCHECK_PING_URL") or None,
+            sentry_dsn=os.getenv("SENTRY_DSN") or None,
         )
 
     def dataset_path(self, name: str) -> Path:

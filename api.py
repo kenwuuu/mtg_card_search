@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from time import perf_counter
@@ -38,6 +39,13 @@ RATE_BULK     = "2/second"
 
 # Maximum card IDs accepted in a single bulk request.
 BULK_MAX_IDS  = 200
+
+# A dataset's underlying .ndjson file is considered stale if it hasn't been
+# replaced (by data_updater.py) in longer than this. data_updater.py's own
+# docstring targets a 5-7 day refresh cadence, so 10 days gives it a couple
+# of missed runs' worth of slack before /v1/health flags it. Reported via
+# /v1/health so an external monitor can poll and alert on it.
+STALE_AFTER_SECONDS = 10 * 24 * 3600
 
 # CORS origins, sourced from the CORS_ORIGIN env var (see settings.py).
 CORS_ORIGINS  = settings.cors_origins
@@ -316,13 +324,34 @@ class BulkLookupRequest(BaseModel):
 # Routes
 # ---------------------------------------------------------------------------
 
+def _dataset_health(name: str, idx: Dict[str, int]) -> dict:
+    """Entry count plus freshness, derived from the .ndjson file's mtime so
+    it reflects when data_updater.py last replaced it — not when this
+    process last rebuilt its in-memory index (which also happens on every
+    restart, and would otherwise look falsely fresh after one)."""
+    info = {"entries": len(idx), "last_updated": None, "age_seconds": None, "stale": None}
+    try:
+        mtime = DATA_FILES[name].stat().st_mtime
+    except OSError:
+        return info
+    last_updated = datetime.fromtimestamp(mtime, tz=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - last_updated).total_seconds()
+    info.update(
+        last_updated=last_updated.isoformat(),
+        age_seconds=age_seconds,
+        stale=age_seconds > STALE_AFTER_SECONDS,
+    )
+    return info
+
+
 @app.get("/v1/health")
 def health():
     if not any(indices.values()):
         raise HTTPException(status_code=503, detail="No indices loaded")
+    datasets = {name: _dataset_health(name, idx) for name, idx in indices.items()}
     return {
-        "status": "ok",
-        "datasets": {name: len(idx) for name, idx in indices.items()},
+        "status": "degraded" if any(d["stale"] for d in datasets.values()) else "ok",
+        "datasets": datasets,
     }
 
 
