@@ -68,6 +68,11 @@ if you'd rather do it by hand or understand what it's doing. Either way, step
    Then run `sudo caddy reload --config /etc/caddy/Caddyfile` (or restart the
    `caddy` service, depending on how it was installed).
 
+   Keep Caddy on the **same host** as uvicorn unless you know what you're
+   doing — the API's per-IP rate limiting depends on it. See
+   [Rate limiting behind the proxy](#rate-limiting-behind-the-proxy) before
+   putting a proxy/LB on a different host or exposing port 8000 directly.
+
 6. Set up a process manager so the API survives crashes and reboots. Create
    `/etc/systemd/system/mtg-card-search.service`:
    ```ini
@@ -164,6 +169,44 @@ Then run `./scripts/smoke_test.sh` (or at minimum
 source .venv/bin/activate
 python3 data_updater.py
 ```
+
+## Rate limiting behind the proxy
+
+`api.py` rate-limits per client IP via slowapi, keyed by `get_remote_address`
+(which reads `request.client.host`): `/v1/cards/{id}` at 200/s, and the
+multi-card `/v1/cards/bulk/lookup` and `/v1/cards/random` at 2/s. Limits are
+per source IP **and** per route, so one noisy client can't throttle everyone
+else — *provided "client IP" is actually the end user's IP.*
+
+Behind Caddy it isn't, directly: the socket uvicorn sees belongs to Caddy, not
+the user. What saves us is uvicorn's proxy-headers middleware, which rewrites
+the client to the real IP from the `X-Forwarded-For` header Caddy sets — but
+**only** when the immediate peer is in `--forwarded-allow-ips`. That list
+defaults to `127.0.0.1` (override with the `FORWARDED_ALLOW_IPS` env var), and
+`proxy_headers` is on by default, so the setup documented above — Caddy on the
+**same host** as uvicorn — works out of the box with no extra flags: per-IP
+limiting sees real client IPs.
+
+Where this silently breaks, and what to do:
+
+- **Proxy on a different host.** If Caddy (or an upstream LB/CDN) runs anywhere
+  other than `127.0.0.1`, its peer IP isn't trusted, uvicorn ignores
+  `X-Forwarded-For`, and *every* request collapses to the proxy's single IP —
+  the limit becomes effectively **global** and a handful of clients can 429
+  everyone. Fix: add `--forwarded-allow-ips=<proxy-ip>` to the uvicorn
+  `ExecStart` in the systemd unit (or set `FORWARDED_ALLOW_IPS`).
+- **Direct access to port 8000.** The systemd `ExecStart` binds `0.0.0.0:8000`,
+  so if that port is reachable from outside it bypasses Caddy (and TLS)
+  entirely. Firewall it so all traffic goes through Caddy and carries a trusted
+  `X-Forwarded-For`. (uvicorn only trusts a request with exactly one
+  `X-Forwarded-For` header — which Caddy's `reverse_proxy` sets — so a client
+  appending its own spoofed value is ignored.)
+- **Multiple uvicorn workers.** slowapi's counters here are in-memory and
+  per-process. The current `ExecStart` runs a single worker, so this is fine
+  today — but adding `--workers N` gives each worker its own counters, making
+  the effective limit `N ×` the configured rate. To keep one shared limit
+  across workers, configure a slowapi storage backend (e.g. Redis) instead of
+  the in-memory default.
 
 ## Alerting
 

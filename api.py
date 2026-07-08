@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import json
 import logging
+import random
 import threading
 import watchfiles
 import asyncio
@@ -40,6 +41,9 @@ RATE_BULK     = "2/second"
 # Maximum card IDs accepted in a single bulk request.
 BULK_MAX_IDS  = 200
 
+# Maximum cards returned by a single /v1/cards/random request.
+RANDOM_MAX_N  = 100
+
 # A dataset's underlying .ndjson file is considered stale if it hasn't been
 # replaced (by data_updater.py) in longer than this. data_updater.py's own
 # docstring targets a 5-7 day refresh cadence, so 10 days gives it a couple
@@ -68,6 +72,13 @@ DATA_FILES: Dict[str, Path] = _make_data_files()
 
 # { dataset_name -> { normalized_key -> byte_offset } }
 indices: Dict[str, Dict[str, int]] = {name: {} for name in DATASET_NAMES}
+
+# { dataset_name -> [byte_offset, ...] } — one entry per (non-skipped) card,
+# built alongside `indices`. Unlike `indices`, which maps several keys (name,
+# set+number, ...) to the same card, this holds exactly one offset per card, so
+# it can be sampled directly by /v1/cards/random without biasing toward cards
+# that happen to have more aliases.
+card_offsets: Dict[str, List[int]] = {name: [] for name in DATASET_NAMES}
 
 # Thread-local open file handles: _local.handles = { dataset_name -> file }
 _local = threading.local()
@@ -156,6 +167,7 @@ def build_index(dataset: str) -> None:
     """
     path = DATA_FILES[dataset]
     new_index: Dict[str, int] = {}
+    new_offsets: List[int] = []
     should_skip = SKIP_PREDICATES[dataset]
     extract_keys = KEY_EXTRACTORS[dataset]
 
@@ -173,13 +185,16 @@ def build_index(dataset: str) -> None:
             if should_skip(data):
                 continue
 
+            new_offsets.append(offset)
             for key in extract_keys(data):
                 if key not in new_index:
                     new_index[key] = offset
 
-    # Atomic rebind — readers always look up `indices[dataset]` fresh, so this
-    # swap never exposes a partially-populated index to a concurrent reader.
+    # Atomic rebind — readers always look up `indices[dataset]` /
+    # `card_offsets[dataset]` fresh, so these swaps never expose a
+    # partially-populated structure to a concurrent reader.
     indices[dataset] = new_index
+    card_offsets[dataset] = new_offsets
     logger.info(f"[{dataset}] Index built with {len(new_index)} entries.")
 
 
@@ -242,6 +257,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Per-IP rate limiting, keyed by request.client.host. Behind a reverse proxy
+# this is only the real client IP if uvicorn trusts the proxy's X-Forwarded-For
+# (--forwarded-allow-ips); otherwise every request collapses to the proxy IP and
+# the limit becomes global. See "Rate limiting behind the proxy" in SETUP.md.
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -306,6 +325,23 @@ def bulk_lookup(
     return found, not_found
 
 
+def random_cards(n: int, dataset: Optional[str] = None) -> List[dict]:
+    """Return *n* distinct random cards from *dataset*.
+
+    Samples without replacement from the dataset's per-card offset list, so the
+    result is unbiased (each card equally likely) and free of duplicates. If the
+    dataset holds fewer than *n* cards, every card is returned.
+    """
+    ds = _dataset_for_request(dataset)
+    offsets = card_offsets[ds]
+    f = get_handle(ds)
+    cards = []
+    for offset in random.sample(offsets, min(n, len(offsets))):
+        f.seek(offset)
+        cards.append(json.loads(f.readline()))
+    return cards
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -353,6 +389,19 @@ def health():
         "status": "degraded" if any(d["stale"] for d in datasets.values()) else "ok",
         "datasets": datasets,
     }
+
+
+# NOTE: declared before /v1/cards/{card_id} so the literal "random" path isn't
+# captured by the {card_id} path parameter.
+@app.get("/v1/cards/random")
+@limiter.limit(RATE_BULK)
+def get_random_cards(
+        request: Request,
+        n: int = Query(..., ge=1, le=RANDOM_MAX_N,
+                       description="Number of random cards to return."),
+        dataset: Optional[str] = None,  # e.g. GET /v1/cards/random?n=5&dataset=cards
+):
+    return {"results": random_cards(n, dataset)}
 
 
 @app.get("/v1/cards/{card_id}")
